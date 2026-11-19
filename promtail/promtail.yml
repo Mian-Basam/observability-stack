@@ -1,0 +1,33 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # Collect logs of every container in this compose project via the Docker API.
+  - job_name: containers
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 10s
+        filters:
+          - name: label
+            values: ["com.docker.compose.project=observability"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_name]
+        regex: /(.*)
+        target_label: container
+    pipeline_stages:
+      # demo-app writes JSON logs: promote level/status to labels, keep the rest as content
+      - match:
+          selector: '{service="demo-app"}'
+          stages:
+            - json:
+                expressions: { level: level, status: status, route: route }
+            - labels: { level: "", route: "" }

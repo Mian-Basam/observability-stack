@@ -1,0 +1,99 @@
+groups:
+  - name: service
+    rules:
+      - alert: ServiceDown
+        expr: up{job="orders"} == 0
+        for: 1m
+        labels: { severity: critical, team: payments }
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.instance }} is down"
+          description: "Prometheus cannot scrape {{ $labels.instance }} for more than 1 minute."
+          runbook_url: "docs/RUNBOOKS.md#servicedown"
+
+      - alert: HighErrorRate
+        expr: service:http_errors:ratio5m > 0.05
+        for: 2m
+        labels: { severity: critical, team: payments }
+        annotations:
+          summary: "{{ $labels.service }} 5xx ratio is {{ $value | humanizePercentage }}"
+          runbook_url: "docs/RUNBOOKS.md#higherrorrate"
+
+      - alert: HighLatencyP95
+        expr: service:http_latency_seconds:p95_5m > 0.5
+        for: 5m
+        labels: { severity: warning, team: payments }
+        annotations:
+          summary: "{{ $labels.service }} p95 latency is {{ $value | humanizeDuration }}"
+          runbook_url: "docs/RUNBOOKS.md#highlatencyp95"
+
+  - name: host
+    rules:
+      - alert: HostHighCpu
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "CPU on {{ $labels.instance }} above 85% for 10m ({{ $value | printf \"%.0f\" }}%)"
+          runbook_url: "docs/RUNBOOKS.md#hosthighcpu"
+
+      - alert: HostLowMemory
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.10
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Less than 10% memory available on {{ $labels.instance }}"
+          runbook_url: "docs/RUNBOOKS.md#hostlowmemory"
+
+      - alert: HostDiskWillFillIn24h
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}[6h], 24 * 3600) < 0
+          and node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes < 0.25
+        for: 30m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.mountpoint }} on {{ $labels.instance }} will fill within 24h"
+          runbook_url: "docs/RUNBOOKS.md#hostdiskwillfillin24h"
+
+      - alert: HostDiskAlmostFull
+        expr: node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes < 0.10
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.mountpoint }} on {{ $labels.instance }} has under 10% free"
+          runbook_url: "docs/RUNBOOKS.md#hostdiskalmostfull"
+
+  - name: probes
+    rules:
+      - alert: EndpointDown
+        expr: probe_success == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Probe of {{ $labels.instance }} is failing"
+          runbook_url: "docs/RUNBOOKS.md#endpointdown"
+
+      - alert: TlsCertExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 14
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "TLS certificate for {{ $labels.instance }} expires in {{ $value | printf \"%.0f\" }} days"
+          runbook_url: "docs/RUNBOOKS.md#tlscertexpiringsoon"
+
+  - name: containers
+    rules:
+      - alert: ContainerRestarting
+        expr: increase(container_start_time_seconds{name!=""}[15m]) > 0 and changes(container_start_time_seconds{name!=""}[15m]) > 2
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Container {{ $labels.name }} restarted more than twice in 15m"
+          runbook_url: "docs/RUNBOOKS.md#containerrestarting"
+
+  - name: meta
+    rules:
+      - alert: Watchdog
+        expr: vector(1)
+        labels: { severity: none }
+        annotations:
+          summary: "Always firing: proves the alerting pipeline works end to end"

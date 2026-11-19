@@ -1,0 +1,180 @@
+name: observability
+
+x-logging: &default-logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+services:
+  # ---------------- workload ----------------
+  demo-app:
+    build: ./demo-app
+    ports: ["8000:8000"]
+    logging: *default-logging
+    restart: unless-stopped
+
+  load-generator:
+    image: curlimages/curl:8.10.1
+    depends_on: [demo-app]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          curl -s -o /dev/null http://demo-app:8000/api/orders
+          curl -s -o /dev/null -X POST http://demo-app:8000/api/orders
+          sleep 0.3
+        done
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------- metrics ----------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports: ["9090:9090"]
+    logging: *default-logging
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command: [--config.file=/etc/alertmanager/alertmanager.yml]
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports: ["9093:9093"]
+    logging: *default-logging
+    restart: unless-stopped
+
+  webhook-logger:
+    build: ./webhook-logger
+    ports: ["9095:9095"]
+    logging: *default-logging
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+)($|/)
+    volumes:
+      - /:/host:ro,rslave
+    pid: host
+    logging: *default-logging
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    privileged: true
+    devices: ["/dev/kmsg"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    logging: *default-logging
+    restart: unless-stopped
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.25.0
+    command: [--config.file=/etc/blackbox/blackbox.yml]
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------- logs ----------------
+  loki:
+    image: grafana/loki:3.2.0
+    command: [-config.file=/etc/loki/loki.yml]
+    volumes:
+      - ./loki/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    ports: ["3100:3100"]
+    logging: *default-logging
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:3.2.0
+    command: [-config.file=/etc/promtail/promtail.yml]
+    volumes:
+      - ./promtail/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------- visualisation ----------------
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/service-red.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus, loki]
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ---------------- Zabbix (optional: --profile zabbix) ----------------
+  zabbix-db:
+    image: postgres:16-alpine
+    profiles: [zabbix]
+    environment:
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: ${ZABBIX_DB_PASSWORD:-zabbix}
+      POSTGRES_DB: zabbix
+    volumes: [zabbix-db:/var/lib/postgresql/data]
+    restart: unless-stopped
+
+  zabbix-server:
+    image: zabbix/zabbix-server-pgsql:alpine-7.0-latest
+    profiles: [zabbix]
+    environment:
+      DB_SERVER_HOST: zabbix-db
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: ${ZABBIX_DB_PASSWORD:-zabbix}
+      POSTGRES_DB: zabbix
+    depends_on: [zabbix-db]
+    ports: ["10051:10051"]
+    restart: unless-stopped
+
+  zabbix-web:
+    image: zabbix/zabbix-web-nginx-pgsql:alpine-7.0-latest
+    profiles: [zabbix]
+    environment:
+      ZBX_SERVER_HOST: zabbix-server
+      DB_SERVER_HOST: zabbix-db
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: ${ZABBIX_DB_PASSWORD:-zabbix}
+      POSTGRES_DB: zabbix
+      PHP_TZ: Asia/Karachi
+    depends_on: [zabbix-server]
+    ports: ["8081:8080"]
+    restart: unless-stopped
+
+  zabbix-agent:
+    image: zabbix/zabbix-agent2:alpine-7.0-latest
+    profiles: [zabbix]
+    hostname: zabbix-agent
+    environment:
+      ZBX_HOSTNAME: lab-docker-host
+      ZBX_SERVER_HOST: zabbix-server
+      ZBX_SERVER_ACTIVE: zabbix-server
+    privileged: true
+    pid: host
+    restart: unless-stopped
+
+volumes:
+  prometheus-data: {}
+  grafana-data: {}
+  loki-data: {}
+  zabbix-db: {}

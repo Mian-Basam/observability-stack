@@ -1,0 +1,89 @@
+# promtool test rules prometheus/tests/alerts_test.yml
+rule_files:
+  - ../rules/recording.yml
+  - ../rules/alerts.yml
+evaluation_interval: 15s
+
+tests:
+  - name: ServiceDown fires only after 1 minute
+    interval: 15s
+    input_series:
+      - series: 'up{job="orders", instance="demo-app:8000"}'
+        values: '1 1 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 45s
+        alertname: ServiceDown
+        exp_alerts: []
+      - eval_time: 105s
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: { severity: critical, team: payments, job: orders, instance: "demo-app:8000" }
+            exp_annotations:
+              summary: "orders on demo-app:8000 is down"
+              description: "Prometheus cannot scrape demo-app:8000 for more than 1 minute."
+              runbook_url: "docs/RUNBOOKS.md#servicedown"
+
+  - name: HighErrorRate fires at 20% errors, not at 1%
+    interval: 15s
+    input_series:
+      # 100 req/15s total; 20 of them 500s
+      - series: 'http_requests_total{service="orders", status="200"}'
+        values: '0+80x40'
+      - series: 'http_requests_total{service="orders", status="500"}'
+        values: '0+20x40'
+      - series: 'http_requests_total{service="healthy", status="200"}'
+        values: '0+99x40'
+      - series: 'http_requests_total{service="healthy", status="500"}'
+        values: '0+1x40'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: HighErrorRate
+        exp_alerts:
+          - exp_labels: { severity: critical, team: payments, service: orders }
+            exp_annotations:
+              summary: "orders 5xx ratio is 20%"
+              runbook_url: "docs/RUNBOOKS.md#higherrorrate"
+
+  - name: Error ratio recording rule
+    interval: 15s
+    input_series:
+      - series: 'http_requests_total{service="orders", status="200"}'
+        values: '0+75x40'
+      - series: 'http_requests_total{service="orders", status="503"}'
+        values: '0+25x40'
+    promql_expr_test:
+      - expr: service:http_errors:ratio5m
+        eval_time: 6m
+        exp_samples:
+          - labels: 'service:http_errors:ratio5m{service="orders"}'
+            value: 0.25
+
+  - name: Disk almost full
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{instance="web01", mountpoint="/", fstype="ext4"}'
+        values: '5x10'
+      - series: 'node_filesystem_size_bytes{instance="web01", mountpoint="/", fstype="ext4"}'
+        values: '100x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: HostDiskAlmostFull
+        exp_alerts:
+          - exp_labels: { severity: critical, instance: web01, mountpoint: "/", fstype: ext4 }
+            exp_annotations:
+              summary: "/ on web01 has under 10% free"
+              runbook_url: "docs/RUNBOOKS.md#hostdiskalmostfull"
+
+  - name: Probe failure
+    interval: 30s
+    input_series:
+      - series: 'probe_success{instance="https://example.com", job="blackbox-http"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: EndpointDown
+        exp_alerts:
+          - exp_labels: { severity: critical, instance: "https://example.com", job: blackbox-http }
+            exp_annotations:
+              summary: "Probe of https://example.com is failing"
+              runbook_url: "docs/RUNBOOKS.md#endpointdown"

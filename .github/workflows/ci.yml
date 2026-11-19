@@ -1,0 +1,42 @@
+name: CI
+on: [push, pull_request]
+env:
+  PROM_VERSION: "2.54.1"
+  AM_VERSION: "0.27.0"
+
+jobs:
+  static-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Install tools
+        run: |
+          pip install -r demo-app/requirements.txt pytest ruff yamllint
+          GH=https://github.com/prometheus
+          curl -sL $GH/prometheus/releases/download/v$PROM_VERSION/prometheus-$PROM_VERSION.linux-amd64.tar.gz | tar xz
+          curl -sL $GH/alertmanager/releases/download/v$AM_VERSION/alertmanager-$AM_VERSION.linux-amd64.tar.gz | tar xz
+          sudo cp prometheus-*/prometheus prometheus-*/promtool alertmanager-*/alertmanager alertmanager-*/amtool /usr/local/bin/
+      - run: make test
+      - name: Live alerting pipeline (real Prometheus + Alertmanager)
+        run: make test-live
+
+  compose-smoke:
+    needs: static-and-unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up -d --build
+      - name: Wait for targets and dashboards
+        run: |
+          for i in $(seq 30); do curl -fs localhost:3000/api/health && break; sleep 5; done
+          sleep 30
+          curl -fs localhost:9090/api/v1/targets | python3 -c '
+          import json, sys
+          t = json.load(sys.stdin)["data"]["activeTargets"]
+          down = [x["labels"]["job"] for x in t if x["health"] != "up" and "github" not in x["scrapeUrl"]]
+          print("targets:", len(t), "down:", down); sys.exit(1 if down else 0)'
+          curl -fs -u admin:admin "localhost:3000/api/search?query=" | grep -q "Service Overview"
+      - if: failure()
+        run: docker compose logs --tail=80
